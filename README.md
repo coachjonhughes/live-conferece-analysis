@@ -35,9 +35,9 @@ pip install -r requirements.txt
 Edit `.streamlit/secrets.toml`:
 ```toml
 [email]
-sender    = "your_gmail@gmail.com"     # Gmail account sending the emails
+sender    = "your_gmail@email.com"     # Gmail account sending the emails
 password  = "abcd efgh ijkl mnop"      # 16-char app password from step above
-recipient = "coachjonhughes@gmail.com"  # Where to send updates
+recipient = "your_email@email.com"  # Where to send updates
 ```
 ⚠️ **Never commit secrets.toml to GitHub** — it's already in .gitignore
 
