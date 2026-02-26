@@ -327,8 +327,38 @@ def _render_gender_tab(analysis: dict, state):
             img = chart_win_probability(ts_list, gender, state.meet_name)
             st.image(img, use_container_width=True)
         with chart_tab3:
-            img = chart_leverage_index(leverage, gender, state.meet_name)
-            st.image(img, use_container_width=True)
+            if not leverage:
+                st.info("No remaining events to analyze.")
+            else:
+                rows = ""
+                for item in leverage[:8]:
+                    event = item["event_name"].replace("Women ", "W ").replace("Men ", "M ")
+                    pts = item["total_pts_available"]
+                    n_teams = item["n_teams"]
+                    contenders = ", ".join(item["top_teams_in_event"][:3]) or "—"
+                    rows += f"""
+                    <tr>
+                        <td style="padding:8px 12px;color:#f0c040;font-weight:600;">{event}</td>
+                        <td style="padding:8px 12px;text-align:center;color:#3fb950;">{pts}</td>
+                        <td style="padding:8px 12px;text-align:center;color:#8b949e;">{n_teams}</td>
+                        <td style="padding:8px 12px;color:#58a6ff;font-size:12px;">{contenders}</td>
+                    </tr>"""
+                st.markdown(f"""
+                <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                    <thead>
+                        <tr style="border-bottom:1px solid #30363d;">
+                            <th style="padding:8px 12px;text-align:left;color:#8b949e;">Event</th>
+                            <th style="padding:8px 12px;text-align:center;color:#8b949e;">Pts Available</th>
+                            <th style="padding:8px 12px;text-align:center;color:#8b949e;">Teams</th>
+                            <th style="padding:8px 12px;text-align:left;color:#8b949e;">Top Contenders</th>
+                        </tr>
+                    </thead>
+                    <tbody>{rows}</tbody>
+                </table>
+                <p style="color:#8b949e;font-size:11px;margin-top:8px;text-align:center;">
+                    Sorted by impact on final standings · Top contenders = current top-5 teams with entries
+                </p>
+                """, unsafe_allow_html=True)
 
     st.markdown("---")
     _render_scenario_builder(analysis, state)
@@ -351,9 +381,20 @@ def main():
     <h1 style="text-align:center;color:#f0c040;margin-bottom:4px;">
         🏃 {meet_name}
     </h1>
-    <p style="text-align:center;color:#8b949e;font-size:13px;margin-bottom:20px;">
+    <p style="text-align:center;color:#8b949e;font-size:13px;margin-bottom:12px;">
         Live scoring analysis · Auto-refreshes every {REFRESH_INTERVAL_SECONDS // 60} minutes
     </p>
+    <div style="text-align:center;margin-bottom:20px;">
+        <a href="https://buymeacoffee.com/trackandfielddata" target="_blank"
+           style="display:inline-block;background-color:#FFDD00;color:#000000;
+                  font-weight:700;font-size:14px;padding:10px 22px;border-radius:8px;
+                  text-decoration:none;letter-spacing:0.3px;">
+            ☕ Enjoying the live tracker? Buy me a coffee
+        </a>
+        <p style="color:#8b949e;font-size:11px;margin-top:6px;">
+            This tool is free — tips help keep it running all season 🙏
+        </p>
+    </div>
     """, unsafe_allow_html=True)
 
     # Refresh controls

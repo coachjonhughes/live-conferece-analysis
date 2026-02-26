@@ -474,19 +474,45 @@ def compute_team_scenarios(
     event_breakdown = []
 
     for event in state.get_upcoming_finals(gender):
-        team_entries = [e for e in event.entries if e.athlete.team == team]
+        # Use same top-8 finalist entries as projection/ceiling
+        finalist_entries = _get_finalist_entries(event, state, gender)
+        if not finalist_entries:
+            continue
+
+        # Filter to this team's athletes among the finalists
+        team_entries = [e for e in finalist_entries if e.athlete.team == team]
         if not team_entries:
             continue
 
-        ranked = _rank_entries_by_seed(event)
-        rank_map = {id(e): i + 1 for i, e in enumerate(ranked)}
+        # Rank all finalists by seed — use athlete name as key (not id, which is fragile)
+        ranked = sorted(finalist_entries, key=lambda e: _seed_sort_key(e, event))
+        rank_map = {e.athlete.name: i + 1 for i, e in enumerate(ranked)}
 
-        # Scenario A: seeds hold
+        # Scenario A: seeds hold — use same tie-splitting logic as compute_seed_projection
+        # Group all finalists by seed value, split points among tied athletes
         a_pts = 0
         entry_details = []
+
+        # Build tie-aware place/points map (same algorithm as compute_seed_projection)
+        tie_pts_map: dict[str, float] = {}
+        place = 1
+        i = 0
+        while i < len(ranked) and place <= 8:
+            j = i + 1
+            current_key = _seed_sort_key(ranked[i], event)
+            while j < len(ranked) and abs(_seed_sort_key(ranked[j], event) - current_key) < 0.001:
+                j += 1
+            tied_count = j - i
+            tied_places = list(range(place, min(place + tied_count, 9)))
+            avg_pts = sum(PLACE_POINTS.get(p, 0) for p in tied_places) / len(tied_places) if tied_places else 0
+            for e in ranked[i:j]:
+                tie_pts_map[e.athlete.name] = avg_pts
+            place += tied_count
+            i = j
+
         for entry in team_entries:
-            proj_place = rank_map.get(id(entry), 9)
-            pts = PLACE_POINTS.get(proj_place, 0)
+            pts = tie_pts_map.get(entry.athlete.name, 0)
+            proj_place = rank_map.get(entry.athlete.name, 9)
             a_pts += pts
             entry_details.append({
                 "athlete": entry.athlete.name,
@@ -495,13 +521,9 @@ def compute_team_scenarios(
                 "seed_pts": pts,
             })
 
-        # Scenario B: best case — assign best available places starting from 1
-        b_pts = 0
-        occupied = set(rank_map.get(id(e), 9) for e in ranked if e.athlete.team != team)
-        available_places = sorted(p for p in range(1, 9) if p not in occupied)
-        for i, entry in enumerate(team_entries):
-            if i < len(available_places):
-                b_pts += PLACE_POINTS.get(available_places[i], 0)
+        # Scenario B: best case — team's athletes take best consecutive spots
+        # (same logic as ceiling: independent per-team optimistic)
+        b_pts = sum(PLACE_POINTS.get(p, 0) for p in range(1, min(len(team_entries) + 1, 9)))
 
         # Scenario C: worst case — all athletes finish 9th or lower (0 pts)
         c_pts = 0
