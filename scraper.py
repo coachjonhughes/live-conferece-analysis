@@ -382,18 +382,25 @@ def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tupl
             if not raw_athlete or raw_athlete.lower() in ("athlete", "name", ""):
                 continue
 
-            # Relay table: Team column cell contains "<b> GEORGIA</b><small>Georgia </small>"
-            # Read team name from <small> tag which has the proper-case version
+            cell = cells[athlete_idx]
+            small = cell.find("small")
+            bold_a = cell.find("a")
+
             if is_relay_table:
-                cell = cells[athlete_idx]
-                small = cell.find("small")
-                team = small.get_text(strip=True) if small else raw_athlete.title()
-                # Normalize LSU which is all-caps in small tag too
-                if team.upper() == "LSU":
-                    team = "LSU"
+                # Relay cell: <b><a>Auburn</a></b><br><small>AUB   A</small>
+                # Use the <a> tag text for the proper team name (not <small> which has abbreviation)
+                team = bold_a.get_text(strip=True) if bold_a else raw_athlete.title()
+                team = re.sub(r'\s+[A-Z]$', '', team).strip()  # strip trailing " A" / " B"
+                if not team:
+                    continue
                 name = f"{team} Relay"
+            elif small:
+                # Individual athlete cell: <b><a>Madison CHILDRESS</a></b><br><small>South Carolina [JR]</small>
+                # Name from <a>, team from <small> (strip year tag)
+                name = bold_a.get_text(strip=True) if bold_a else raw_athlete
+                team = re.sub(r'\s*\[(?:JR|SR|FR|SO|\d+)\]\s*$', '', small.get_text(strip=True), flags=re.IGNORECASE).strip()
             else:
-                # Split merged athlete+team cell (individual events)
+                # Fallback: compiled results page merged cell (e.g. "Jordan ANTHONYArkansas")
                 name, team = _split_athlete_team(raw_athlete)
 
             if not name or not team:
@@ -437,12 +444,14 @@ def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tupl
     # Determine status from all collected athletes
     if all_found_athletes:
         athletes = all_found_athletes
-        if all_has_places or (not is_start_list and any(a.final_mark for a in athletes)):
-            status = EventStatus.FINAL
-        elif not is_start_list:
-            status = EventStatus.IN_PROGRESS
-        else:
+        if is_start_list:
+            # Start lists are always SCHEDULED — never mark as FINAL
+            # even if athletes were found (avoids false-complete on pre-meet pages)
             status = EventStatus.SCHEDULED
+        elif all_has_places or any(a.final_mark for a in athletes):
+            status = EventStatus.FINAL
+        else:
+            status = EventStatus.IN_PROGRESS
 
     return athletes, status
 

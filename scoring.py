@@ -100,6 +100,47 @@ def compute_actual_scores(state: MeetState, gender: Gender) -> dict[str, TeamSco
 
 
 # ---------------------------------------------------------------------------
+# Helper: get realistic finalist entries for an upcoming final
+# ---------------------------------------------------------------------------
+
+def _get_finalist_entries(event: MeetEvent, state: MeetState, gender: Gender,
+                           n_finalists: int = 8) -> list:
+    """
+    Returns the entries to use for projection/ceiling/Monte Carlo for an upcoming final.
+
+    Rules:
+    - If the final already has entries (post-prelim), use them as-is.
+    - If the final has no entries but a prelim exists, take only the top-N seeds
+      from the prelim (default 8) — these are the projected finalists.
+    - Field events have no prelims, so all entries are used directly.
+    """
+    entries = event.entries
+
+    if not entries:
+        # Look for a paired prelim
+        for other in state.events:
+            if (other.gender == gender
+                    and other.event_code == event.event_code
+                    and other.round_type == RoundType.PRELIM
+                    and other.entries):
+                entries = other.entries
+                break
+
+    if not entries:
+        return []
+
+    # If entries came from a prelim (more than n_finalists), trim to top seeds
+    if len(entries) > n_finalists:
+        ranked = sorted(
+            entries,
+            key=lambda e: _seed_sort_key(e, event)
+        )
+        entries = ranked[:n_finalists]
+
+    return entries
+
+
+# ---------------------------------------------------------------------------
 # 2. Optimistic ceiling
 # ---------------------------------------------------------------------------
 
@@ -129,24 +170,22 @@ def compute_optimistic_ceiling(
 
     # Upcoming finals
     for event in state.get_upcoming_finals(gender):
+        # Use top-8 seeds only (realistic finalists)
+        entries = _get_finalist_entries(event, state, gender)
+        if not entries:
+            continue
+
+        # Count entries per team
         team_athletes: dict[str, int] = defaultdict(int)
-        for entry in event.entries:
+        for entry in entries:
             team_athletes[entry.athlete.team] += 1
 
-        # Assign best possible places per team, starting from place 1
-        # Fill places in order, giving each team their athletes the best spots
-        place = 1
-        team_list = sorted(team_athletes.keys())
-        for team in team_list:
-            count = team_athletes[team]
-            for _ in range(count):
-                if place in PLACE_POINTS:
-                    ceilings[team] += PLACE_POINTS[place]
-                    place += 1
-                if place > 8:
-                    break
-            if place > 8:
-                break
+        # Ceiling: for each team independently, assume their athletes take the
+        # best N consecutive spots starting from 1 (where N = their athlete count).
+        # This is per-team optimistic — not a shared competition for spots.
+        for team, count in team_athletes.items():
+            team_pts = sum(PLACE_POINTS.get(p, 0) for p in range(1, min(count + 1, 9)))
+            ceilings[team] += team_pts
 
     return dict(ceilings)
 
@@ -171,7 +210,15 @@ def compute_seed_projection(
         projections[team] = ts.actual_points
 
     for event in state.get_upcoming_finals(gender):
+        # Use top-8 seeds only as projected finalists
+        finalist_entries = _get_finalist_entries(event, state, gender)
+        if not finalist_entries:
+            continue
+        # Temporarily substitute entries for ranking
+        orig_entries = event.entries
+        event.entries = finalist_entries
         ranked = _rank_entries_by_seed(event)
+        event.entries = orig_entries
 
         # Check for ties (same mark)
         place = 1
@@ -326,8 +373,8 @@ def compute_win_probability(
     Monte Carlo simulation of remaining events.
     Returns probability dict: team → probability of winning the meet.
     """
-    # Upcoming finals with entries
-    upcoming = [e for e in state.get_upcoming_finals(gender) if e.entries]
+    # Upcoming finals — use top-8 projected finalists for each event
+    upcoming = state.get_upcoming_finals(gender)
 
     if not upcoming:
         # If no events left, just check who's winning
@@ -340,7 +387,14 @@ def compute_win_probability(
     # Precompute ranked entries and strengths for each upcoming event
     event_data = []
     for event in upcoming:
+        # Monte Carlo uses top 15 seeds — wider field captures upset probability
+        finalist_entries = _get_finalist_entries(event, state, gender, n_finalists=15)
+        if not finalist_entries:
+            continue
+        orig_entries = event.entries
+        event.entries = finalist_entries
         ranked = _rank_entries_by_seed(event)
+        event.entries = orig_entries
         n = len(ranked)
         top_prob = _get_top_seed_win_prob(event)
         strengths = [_seed_rank_to_strength(i + 1, n, top_prob) for i in range(n)]
