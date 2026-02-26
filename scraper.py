@@ -52,6 +52,9 @@ def _infer_gender(event_name: str) -> Gender:
     name_lower = event_name.lower()
     if "women" in name_lower:
         return Gender.WOMEN
+    # Pentathlon is always Women, Heptathlon is always Men
+    if "pentathlon" in name_lower and "heptathlon" not in name_lower:
+        return Gender.WOMEN
     return Gender.MEN
 
 
@@ -299,27 +302,30 @@ def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tupl
 
     tables = soup.find_all("table")
 
+    # Collect athletes across all matching tables (heats are separate tables)
+    all_found_athletes = []
+    all_has_places = False
+
     for table in tables:
         rows = table.find_all("tr")
-        if len(rows) < 2:
+        if not rows:
             continue
 
         header_cells = rows[0].find_all(["th", "td"])
         header_texts = [c.get_text(strip=True).lower() for c in header_cells]
 
         # Must contain "athlete" or "team" column
-        # Relay pages use "Team" header; individual event pages use "Athlete"
         is_relay_table = "team" in header_texts and "athlete" not in header_texts
         if "athlete" not in header_texts and not is_relay_table:
             continue
 
         # Skip the records table — it has "Athlete" but no "Pl" or "Time" column
-        has_results_cols = any(h in header_texts for h in ("pl", "time", "sb", "ln"))
+        has_results_cols = any(h in header_texts for h in ("pl", "time", "sb", "ln", "ht"))
         if not has_results_cols:
             continue
 
         # Identify column indices
-        athlete_idx = place_idx = mark_idx = seed_idx = lane_idx = None
+        athlete_idx = place_idx = mark_idx = seed_idx = lane_idx = heat_idx = None
         for i, h in enumerate(header_texts):
             if h == "athlete" or (is_relay_table and h == "team"):
                 athlete_idx = i
@@ -331,6 +337,8 @@ def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tupl
                 seed_idx = i
             elif h in ("ln", "lane"):
                 lane_idx = i
+            elif h == "ht":
+                heat_idx = i
 
         if athlete_idx is None:
             continue
@@ -342,9 +350,27 @@ def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tupl
         has_places = False
         found_athletes = []
 
-        for row in rows[1:]:
-            cells = row.find_all(["td", "th"])
-            if len(cells) <= athlete_idx:
+        # 2026 FlashResults start lists have malformed HTML:
+        # <tbody> contains <td> elements directly (not wrapped in <tr>)
+        # BeautifulSoup only finds the header <tr>, data cells are loose
+        # Fix: collect all <td> from tbody and group them by column count
+        tbody = table.find("tbody")
+        data_rows = []
+        if tbody:
+            loose_tds = tbody.find_all("td", recursive=False)
+            if loose_tds:
+                # Group loose <td> elements into rows based on header column count
+                ncols = len(header_texts)
+                grouped = [loose_tds[i:i+ncols] for i in range(0, len(loose_tds), ncols)]
+                data_rows = grouped
+            else:
+                # Normal structure: rows in tbody
+                data_rows = [r.find_all(["td","th"]) for r in tbody.find_all("tr")]
+        else:
+            data_rows = [r.find_all(["td","th"]) for r in rows[1:]]
+
+        for cells in data_rows:
+            if not cells or len(cells) <= athlete_idx:
                 continue
 
             def ct(idx):
@@ -404,14 +430,19 @@ def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tupl
             found_athletes.append(athlete)
 
         if found_athletes:
-            athletes = found_athletes
-            if has_places or (not is_start_list and any(a.final_mark for a in athletes)):
-                status = EventStatus.FINAL
-            elif not is_start_list:
-                status = EventStatus.IN_PROGRESS
-            else:
-                status = EventStatus.SCHEDULED
-            break
+            all_found_athletes.extend(found_athletes)
+            if has_places:
+                all_has_places = True
+
+    # Determine status from all collected athletes
+    if all_found_athletes:
+        athletes = all_found_athletes
+        if all_has_places or (not is_start_list and any(a.final_mark for a in athletes)):
+            status = EventStatus.FINAL
+        elif not is_start_list:
+            status = EventStatus.IN_PROGRESS
+        else:
+            status = EventStatus.SCHEDULED
 
     return athletes, status
 
