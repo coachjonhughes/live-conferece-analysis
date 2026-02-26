@@ -159,9 +159,9 @@ def _render_standings_table(analysis: dict):
         <tr style="background:{'#1c2128' if i % 2 == 0 else '#161b22'};">
             <td style="padding:7px 12px;color:#8b949e;width:36px;">{medal}</td>
             <td style="padding:7px 12px;color:#e6edf3;font-weight:600;">{ts.team}</td>
-            <td style="padding:7px 12px;color:#f0c040;text-align:right;font-weight:bold;">{ts.actual_points}</td>
-            <td style="padding:7px 12px;color:#58a6ff;text-align:right;">{ts.seed_projection}</td>
-            <td style="padding:7px 12px;color:#3fb950;text-align:right;">{ts.optimistic_ceiling}</td>
+            <td style="padding:7px 12px;color:#f0c040;text-align:right;font-weight:bold;">{round(ts.actual_points, 2):g}</td>
+            <td style="padding:7px 12px;color:#58a6ff;text-align:right;">{round(ts.seed_projection, 2):g}</td>
+            <td style="padding:7px 12px;color:#3fb950;text-align:right;">{round(ts.optimistic_ceiling, 2):g}</td>
             <td style="padding:7px 12px;color:#bc8cff;text-align:right;">{ts.win_probability:.1f}%</td>
         </tr>"""
 
@@ -290,7 +290,7 @@ def _render_gender_tab(analysis: dict, state):
         </div>""", unsafe_allow_html=True)
     with mcol2:
         st.markdown(f"""<div class="metric-card">
-            <div class="metric-value">{leader.actual_points if leader else 0}</div>
+            <div class="metric-value">{f"{leader.actual_points:g}" if leader else 0}</div>
             <div class="metric-label">Leader's Points</div>
         </div>""", unsafe_allow_html=True)
     with mcol3:

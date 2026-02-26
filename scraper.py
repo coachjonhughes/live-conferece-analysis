@@ -114,7 +114,12 @@ def _mark_to_seconds(mark: str) -> Optional[float]:
 def parse_index(meet_url: str) -> list[dict]:
     """
     Parse the meet index page and return a list of raw event dicts.
-    Each dict has: event_name, round_str, compiled_url, start_url, day, start_time
+
+    FlashResults index tables have this structure:
+      Day | Time | (blank) | Event Name (link OR plain text) | Round | Start List link | Result link | (blank) | Status
+
+    The event name may be a plain text cell OR a link depending on meet year.
+    We must NOT use the Result/Start List link text as the event name.
     """
     url = f"{meet_url}/index.htm"
     soup = _get(url)
@@ -122,58 +127,83 @@ def parse_index(meet_url: str) -> list[dict]:
         raise RuntimeError(f"Could not fetch meet index: {url}")
 
     events = []
-
-    # Detect meet name
     title_tag = soup.find("title")
     meet_name = title_tag.get_text(strip=True) if title_tag else "Track Meet"
-
     current_day = "Unknown"
+
+    # Words that indicate a cell is a column label, not an event name
+    NON_EVENT_TEXTS = {
+        "result", "results", "scores", "start list", "status",
+        "day", "start", "rnd", "round", "", "-"
+    }
+    EVENT_KEYWORDS = [
+        "women", "men", "mile", "hurdle", "relay", "jump",
+        "vault", "shot", "weight", "throw", "dmr", "pentathlon",
+        "heptathlon", "3000", "5000", "800m", "400m", "200m",
+        "60m", "1500", "1000",
+    ]
 
     for row in soup.find_all("tr"):
         cells = row.find_all("td")
-        if not cells or len(cells) < 6:
+        if not cells or len(cells) < 4:
             continue
 
         texts = [c.get_text(strip=True) for c in cells]
 
-        # Day header rows have "Thursday"/"Friday"/"Saturday" in first cell
         if texts[0] in ("Thursday", "Friday", "Saturday"):
             current_day = texts[0]
 
-        # Event rows: look for a link in the event name cell
-        event_link = None
         compiled_href = None
         start_href = None
         round_str = ""
         start_time = ""
+        event_name = ""
 
         for i, cell in enumerate(cells):
-            links = cell.find_all("a")
             cell_text = texts[i] if i < len(texts) else ""
+            links = cell.find_all("a")
 
-            # The round cell contains "Prelims", "Final", "Finals"
-            if cell_text in ("Prelims", "Final", "Finals", "Finals "):
-                round_str = cell_text.strip().rstrip("s")  # normalize to "Prelim"/"Final"
+            # Round detection
+            clean = cell_text.strip().rstrip("s")
+            if clean in ("Prelim", "Final"):
+                round_str = clean
 
-            # Time cell
+            # Time detection
             if re.match(r"\d+:\d+ [AP]M", cell_text):
                 start_time = cell_text
 
+            # Event name: cell text that looks like an event name (not a link label)
+            if (cell_text.lower() not in NON_EVENT_TEXTS
+                    and any(kw in cell_text.lower() for kw in EVENT_KEYWORDS)
+                    and not event_name):
+                event_name = cell_text
+
             for link in links:
                 href = link.get("href", "")
+                link_text = link.get_text(strip=True)
+
+                # Event name from link — only if it looks like an actual event name
+                if (link_text.lower() not in NON_EVENT_TEXTS
+                        and any(kw in link_text.lower() for kw in EVENT_KEYWORDS)
+                        and not event_name):
+                    event_name = link_text
+
                 if "_compiled.htm" in href:
                     compiled_href = href
-                    event_link = link.get_text(strip=True)
                 elif "_start.htm" in href:
                     start_href = href
                 elif "_Scores.htm" in href:
                     compiled_href = href
                     start_href = href
-                    event_link = link.get_text(strip=True)
 
-        if event_link and compiled_href:
+        # Only add if we found a compiled URL
+        # Event name fallback: derive from compiled href if still empty
+        if compiled_href:
+            if not event_name:
+                # Will be resolved from page title during individual page fetch
+                event_name = ""
             events.append({
-                "event_name": event_link,
+                "event_name": event_name,
                 "round_str": round_str or "Final",
                 "compiled_url": f"{meet_url}/{compiled_href}",
                 "start_url": f"{meet_url}/{start_href}" if start_href else "",
@@ -210,16 +240,56 @@ def _parse_href(href: str) -> tuple[str, int, bool]:
 # Result / start list page parser
 # ---------------------------------------------------------------------------
 
+def _split_athlete_team(raw: str) -> tuple[str, str]:
+    """
+    FlashResults merges athlete name and team into one cell, e.g.:
+        'Kaila JACKSONGeorgia [JR]'   -> ('Kaila JACKSON', 'Georgia')
+        'Brianna LYSTONLSU [JR]'      -> ('Brianna LYSTON', 'LSU')
+        'Jordan ANTHONYArkansas [JR]' -> ('Jordan ANTHONY', 'Arkansas')
+
+    Strategy:
+    1. Strip year tag [JR]/[SR]/[FR]/[SO]
+    2. Check for known all-caps team names (LSU, TCU, etc.) at end
+    3. Otherwise find where LASTNAME caps block ends and TitleCase team begins
+    """
+    raw = _normalize_mark(raw)
+    raw = re.sub(r'\s*\[(?:JR|SR|FR|SO|\d+)\]\s*$', '', raw, flags=re.IGNORECASE).strip()
+
+    if not raw:
+        return "", ""
+
+    # Known all-caps team names in SEC and major conferences
+    ALL_CAPS_TEAMS = [
+        'LSU', 'TCU', 'SMU', 'UAB', 'UTSA', 'UTEP', 'UCF', 'BYU',
+        'VCU', 'UNLV', 'UNC', 'USC', 'UCLA', 'UCONN', 'USF', 'FIU',
+        'FAU', 'UMBC', 'NJIT', 'UMass',
+        # NOTE: 'URI' intentionally excluded — it is a suffix of 'Missouri'
+        # which causes 'MissouRI' to be incorrectly split as team='URI'
+    ]
+    for team in ALL_CAPS_TEAMS:
+        if raw.upper().endswith(team.upper()):
+            name_part = raw[:-len(team)].strip()
+            if name_part:
+                return name_part, team
+
+    # Standard case: LASTNAME followed immediately by TitleCase team name
+    match = re.search(r'([A-Z]{2,})((?:[A-Z][a-z].*))$', raw)
+    if match:
+        team_part = match.group(2).strip()
+        name_part = raw[:match.start(2)].strip()
+        return name_part, team_part
+
+    return raw, ""
+
+
 def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tuple[list[Athlete], EventStatus]:
     """
     Parse a compiled result or start list page.
     Returns (list of Athlete, EventStatus).
 
-    FlashResults compiled pages contain a table with columns like:
-    Place | Name | Year | Team | Time/Mark | [Wind] | [SB/PB]
-    
-    Start list pages have:
-    # | Name | Year | Team | SB
+    FlashResults actual column structure (from diagnostic):
+      Results:   Pl | (blank) | Athlete+Team | Time | ... | SB/PB flag
+      StartList: (blank) | Ln | (blank) | Athlete+Team | SB | NCAA | PB
     """
     athletes = []
     status = EventStatus.SCHEDULED
@@ -227,7 +297,6 @@ def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tupl
     if not soup:
         return athletes, status
 
-    # Look for the main results table — FlashResults uses consistent structure
     tables = soup.find_all("table")
 
     for table in tables:
@@ -235,61 +304,95 @@ def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tupl
         if len(rows) < 2:
             continue
 
-        # Check header row to identify column positions
         header_cells = rows[0].find_all(["th", "td"])
         header_texts = [c.get_text(strip=True).lower() for c in header_cells]
 
-        # Must have name and team columns
-        if "name" not in header_texts and "athlete" not in header_texts:
+        # Must contain "athlete" or "team" column
+        # Relay pages use "Team" header; individual event pages use "Athlete"
+        is_relay_table = "team" in header_texts and "athlete" not in header_texts
+        if "athlete" not in header_texts and not is_relay_table:
+            continue
+
+        # Skip the records table — it has "Athlete" but no "Pl" or "Time" column
+        has_results_cols = any(h in header_texts for h in ("pl", "time", "sb", "ln"))
+        if not has_results_cols:
             continue
 
         # Identify column indices
-        name_idx = team_idx = mark_idx = place_idx = seed_idx = None
+        athlete_idx = place_idx = mark_idx = seed_idx = lane_idx = None
         for i, h in enumerate(header_texts):
-            if h in ("name", "athlete"):
-                name_idx = i
-            elif h in ("team", "school", "affiliation"):
-                team_idx = i
-            elif h in ("time", "mark", "result", "distance", "height"):
-                mark_idx = i
-            elif h in ("pl", "place", "#", "pos"):
+            if h == "athlete" or (is_relay_table and h == "team"):
+                athlete_idx = i
+            elif h in ("pl", "place"):
                 place_idx = i
-            elif h in ("sb", "seed", "entry", "pb", "best"):
+            elif h in ("time", "mark", "distance", "height"):
+                mark_idx = i
+            elif h == "sb":
                 seed_idx = i
+            elif h in ("ln", "lane"):
+                lane_idx = i
 
-        if name_idx is None or team_idx is None:
+        if athlete_idx is None:
             continue
 
+        # If no mark column found, use the cell immediately after athlete
+        if mark_idx is None and not is_start_list:
+            mark_idx = athlete_idx + 1
+
         has_places = False
+        found_athletes = []
 
         for row in rows[1:]:
             cells = row.find_all(["td", "th"])
-            if len(cells) <= max(filter(None, [name_idx, team_idx])):
+            if len(cells) <= athlete_idx:
                 continue
 
-            def cell_text(idx):
+            def ct(idx):
                 if idx is None or idx >= len(cells):
                     return ""
                 return _normalize_mark(cells[idx].get_text(strip=True))
 
-            name = cell_text(name_idx)
-            team = cell_text(team_idx)
+            raw_athlete = ct(athlete_idx)
+            if not raw_athlete or raw_athlete.lower() in ("athlete", "name", ""):
+                continue
+
+            # Relay table: Team column cell contains "<b> GEORGIA</b><small>Georgia </small>"
+            # Read team name from <small> tag which has the proper-case version
+            if is_relay_table:
+                cell = cells[athlete_idx]
+                small = cell.find("small")
+                team = small.get_text(strip=True) if small else raw_athlete.title()
+                # Normalize LSU which is all-caps in small tag too
+                if team.upper() == "LSU":
+                    team = "LSU"
+                name = f"{team} Relay"
+            else:
+                # Split merged athlete+team cell (individual events)
+                name, team = _split_athlete_team(raw_athlete)
 
             if not name or not team:
                 continue
-            # Skip header-like rows
-            if name.lower() in ("name", "athlete", ""):
-                continue
 
-            mark = cell_text(mark_idx) if mark_idx is not None else ""
-            seed = cell_text(seed_idx) if seed_idx is not None else ""
-
-            place_str = cell_text(place_idx) if place_idx is not None else ""
+            # Place
+            place_str = ct(place_idx) if place_idx is not None else ""
+            # Also check cell 0 if place_idx not found (often "Pl" is col 0)
+            if not place_str and place_idx is None:
+                place_str = ct(0)
             place = None
             if place_str.isdigit():
                 place = int(place_str)
                 if 1 <= place <= 8:
                     has_places = True
+
+            # Mark/time
+            mark = ct(mark_idx) if mark_idx is not None else ""
+            # Strip parenthetical splits like "6.56(6.554)"
+            mark = re.sub(r'\(.*?\)', '', mark).strip()
+
+            # Seed mark
+            seed = ct(seed_idx) if seed_idx is not None else ""
+            # Normalize seed — remove flag like "=SB", "PB", "SB"
+            seed = re.sub(r'^[=]?(SB|PB|MR|CR|FR|NR|WR)$', '', seed, flags=re.IGNORECASE).strip()
 
             athlete = Athlete(
                 name=name,
@@ -298,16 +401,17 @@ def _parse_result_page(soup: BeautifulSoup, is_start_list: bool = False) -> tupl
                 final_mark=mark if not is_start_list else None,
                 final_place=place,
             )
-            athletes.append(athlete)
+            found_athletes.append(athlete)
 
-        if athletes:
+        if found_athletes:
+            athletes = found_athletes
             if has_places or (not is_start_list and any(a.final_mark for a in athletes)):
                 status = EventStatus.FINAL
             elif not is_start_list:
                 status = EventStatus.IN_PROGRESS
             else:
                 status = EventStatus.SCHEDULED
-            break   # Found the right table
+            break
 
     return athletes, status
 
@@ -351,7 +455,7 @@ def _parse_scores_page(soup: BeautifulSoup, event_name: str, gender: Gender) -> 
             elif h in ("pts", "points", "score", "total"):
                 score_idx = i
 
-        if name_idx is None or team_idx is None:
+        if name_idx is None:
             continue
 
         athletes = []
@@ -359,7 +463,7 @@ def _parse_scores_page(soup: BeautifulSoup, event_name: str, gender: Gender) -> 
 
         for row in rows[1:]:
             cells = row.find_all(["td", "th"])
-            if len(cells) <= max(filter(None, [name_idx, team_idx])):
+            if not cells or name_idx >= len(cells):
                 continue
 
             def ct(idx):
@@ -367,8 +471,18 @@ def _parse_scores_page(soup: BeautifulSoup, event_name: str, gender: Gender) -> 
                     return ""
                 return _normalize_mark(cells[idx].get_text(strip=True))
 
-            name = ct(name_idx)
-            team = ct(team_idx)
+            raw_name = ct(name_idx)
+            if not raw_name:
+                continue
+
+            # Handle both merged (name+team in one cell) and separate columns
+            if team_idx is not None:
+                name = raw_name
+                team = ct(team_idx)
+            else:
+                # Merged cell — same logic as regular result parser
+                name, team = _split_athlete_team(raw_name)
+
             if not name or not team:
                 continue
 
@@ -449,6 +563,21 @@ def scrape_meet(meet_url: str) -> MeetState:
         # Fetch the compiled page to get status and results
         time.sleep(REQUEST_DELAY)
         soup = _get(raw["compiled_url"])
+
+        # If event name is blank (2025 index style), read it from page title
+        # Page titles look like: "Women 60 M", "Men 1 Mile", etc.
+        if not raw["event_name"] and soup:
+            title_tag = soup.find("title")
+            if title_tag:
+                page_title = title_tag.get_text(strip=True)
+                # Clean up suffixes like " - SEC Indoor Championships"
+                page_title = page_title.split(" - ")[0].strip()
+                # Normalize "60 M" -> "60m", "1 Mile" -> "1 Mile" etc
+                raw["event_name"] = page_title
+                event.event_name = page_title
+                gender = _infer_gender(page_title)
+                event.gender = gender
+
         athletes, status = _parse_result_page(soup, is_start_list=False)
 
         # If compiled page has no results yet, try the start list for seeds

@@ -97,12 +97,12 @@ class CombinedEventResult:
 class TeamScore:
     team: str
     gender: Gender
-    actual_points: int = 0
+    actual_points: float = 0
     events_scored: list[str] = field(default_factory=list)
 
     # Projection fields (populated by scoring.py)
-    optimistic_ceiling: int = 0
-    seed_projection: int = 0
+    optimistic_ceiling: float = 0
+    seed_projection: float = 0
     win_probability: float = 0.0
 
     # Scenario builder outputs

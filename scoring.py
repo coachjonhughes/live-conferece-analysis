@@ -67,13 +67,23 @@ def compute_actual_scores(state: MeetState, gender: Gender) -> dict[str, TeamSco
 
     # Regular finals
     for event in state.get_completed_finals(gender):
+        # Group athletes by final_place to detect ties
+        from collections import defaultdict as _dd
+        place_groups = _dd(list)
         for entry in event.entries:
             a = entry.athlete
             if a.final_place and a.final_place in PLACE_POINTS:
-                pts = PLACE_POINTS[a.final_place]
+                place_groups[a.final_place].append(a)
+
+        for place, athletes_at_place in place_groups.items():
+            n = len(athletes_at_place)
+            # Split points across tied places: e.g. 2 tied for 3rd get (6+5)/2=5.5 each
+            total_pts = sum(PLACE_POINTS.get(place + i, 0) for i in range(n))
+            split_pts = total_pts / n
+            for a in athletes_at_place:
                 ts = _get_or_create(a.team)
-                ts.actual_points += pts
-                ts.events_scored.append(f"{event.event_name} ({a.final_place})")
+                ts.actual_points += split_pts
+                ts.events_scored.append(f"{event.event_name} ({place}{'+' if n > 1 else ''}={split_pts:.2f}pt)")
 
     # Combined events (Pent/Hep) if complete
     for combined in state.combined_events:
